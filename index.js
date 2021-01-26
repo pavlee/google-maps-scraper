@@ -1,40 +1,65 @@
 const puppeteer = require('puppeteer');
 
+const sqrMNE = {
+    topLeft: { y: 43.577914, x: 18.389149 },
+    topRight: { y: 43.577914, x: 20.389149 },
+    bottomLeft: { y: 41.85, x: 18.389149 },
+    bottomRight: { y: 41.85, x: 20.389149 }
+};
+
 (async () => {
     const browser = await puppeteer.launch();
     const page = await browser.newPage();
     await page.goto('https://www.google.com/maps/search/Bars+and+pubs/@42.4323168,19.185324,12z');
+    let currentPage = 0;
 
-    const placeNames = await page.$$eval('.section-result', divs => divs.map(div => div.getAttribute('aria-label')));
-    console.log("Places found: " + placeNames.length);
+    do {
+        console.log("Scraping page " + 0)
+        const placeNames = await page.$$eval('.section-result', divs => divs.map(div => div.getAttribute('aria-label')));
+        console.log("Places found: " + placeNames.length);
 
-    while (await page.waitForSelector('button[aria-label*="Next page"]')) {
         for( let i = 0; i < placeNames.length; i++ ) {
-            console.log("Loop " + i);
             await page.click('.section-result[data-result-index="' + (i+1) + '"]')
+            await new Promise(resolve => setTimeout(resolve, 2000))
             await page.waitForSelector('.section-back-to-list-button')
 
-            const place = await scrapePlaceData(page)
-            console.log(place)
-
+            if (await withinBounds(page)) {
+                const place = await scrapePlaceData(page)
+                console.log(place)
+            }
+            
             await page.click('.section-back-to-list-button')
+            await new Promise(resolve => setTimeout(resolve, 1500))
             await page.waitForSelector('.section-result')
         };
-    }
+
+        await page.click('button[aria-label*="Next page"]')
+        await new Promise(resolve => setTimeout(resolve, 5000))
+        //page.waitForNavigation({ waitUntil: "networkidle0" }),
+    } while (await page.waitForSelector('button[aria-label*="Next page"]'));
+
     await browser.close();
 })();
 
 const scrapePlaceData = async (page) => {
     let place = {}
+    const nameSelector = '.section-hero-header-title-top-container h1 > span';
+    if (await page.$(nameSelector)) {
+        const name = await page.$eval(nameSelector, name => name.textContent)
+        place.name = name
+    }
 
-    const name = await page.$eval('.section-hero-header-title-top-container h1 > span', name => name.textContent)
-    place.name = name
+    const categorySelector = '.section-rating div:nth-child(2) button.widget-pane-link';
+    if (await page.$(categorySelector)) {
+        const category = await page.$eval(categorySelector, category => category.textContent)
+        place.category = category
+    }
 
-    const category = await page.$eval('.section-rating div:nth-child(2) button.widget-pane-link', category => category.textContent)
-    place.category = category
-
-    const noOfReviews = await page.$eval('.section-rating div:nth-child(1) button.widget-pane-link', reviews => reviews.textContent.split(' ')[0])
-    place.noOfReviews = noOfReviews
+    const reviewSelector = '.section-rating div:nth-child(1) button.widget-pane-link';
+    if (await page.$(reviewSelector)) {
+        const noOfReviews = await page.$eval(reviewSelector, reviews => reviews.textContent.split(' ')[0])
+        place.noOfReviews = noOfReviews
+    }
 
     let addressHandles = await page.$x('.//button[@data-item-id="address"]')
     if (addressHandles.length > 0) {
@@ -68,8 +93,11 @@ const scrapePlaceData = async (page) => {
         place.website = website.replace('Website: ', '').trim()
     }
 
-    const plusCode = await page.$eval('button[aria-label^="Plus code"', reviews => reviews.getAttribute('aria-label').replace('Plus code: ', '').split(' ')[0])
-    place.plusCode = plusCode
+    const plusCodeSelector = 'button[aria-label^="Plus code"';
+    if (await page.$(plusCodeSelector)) {
+        const plusCode = await page.$eval(plusCodeSelector, reviews => reviews.getAttribute('aria-label').replace('Plus code: ', '').split(' ')[0])
+        place.plusCode = plusCode
+    }
 
     const openDays = await page.$$eval('.section-open-hours-container table th > div:nth-child(1)', divs => divs.map(div => div.textContent))
     const openTimes = await page.$$eval('.section-open-hours-container table td ul li', lis => lis.map(li => li.textContent))
@@ -84,5 +112,14 @@ const scrapePlaceData = async (page) => {
         }
     }
 
+    const url = page.url()
+    place.coordinates = url.substr(url.lastIndexOf('!3d') + 3).split('!4d')
     return place;
+}
+
+const withinBounds = async (page) => {
+    const url = page.url()
+    const coordinates = url.substr(url.lastIndexOf('!3d') + 3).split('!4d')
+    const point = { y: coordinates[0], x: coordinates[1] }
+    return point.x > sqrMNE.topLeft.x && point.x < sqrMNE.bottomRight.x && point.y < sqrMNE.topLeft.y && point.y > sqrMNE.bottomRight.y;
 }
