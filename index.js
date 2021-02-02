@@ -1,4 +1,7 @@
 const puppeteer = require('puppeteer');
+const fs = require('fs');
+const MongoClient = require('mongodb').MongoClient;
+const Server = require('mongodb').Server;
 
 const sqrMNE = {
     topLeft: { y: 43.577914, x: 18.389149 },
@@ -8,38 +11,62 @@ const sqrMNE = {
 };
 
 (async () => {
+    // Open the connection to the server
+    MongoClient.connect('mongodb://admin:admin@localhost:27017/', (err, db) => {
+        // Get the first db and do an update document on it
+        mainLoop(db.db("places"))
+    })
+})();
+
+async function mainLoop(db) {
+    const placeCategories = ["Bars", "Restaurants", "Takeout", "Groceries", "Hotels", "Banks"]
     const browser = await puppeteer.launch();
     const page = await browser.newPage();
-    await page.goto('https://www.google.com/maps/search/Bars+and+pubs/@42.4323168,19.185324,12z');
+
+    let rawData = fs.readFileSync('starting-points.json')
+    let startingPoints = JSON.parse(rawData)
     let currentPage = 0;
 
-    do {
-        console.log("Scraping page " + 0)
-        const placeNames = await page.$$eval('.section-result', divs => divs.map(div => div.getAttribute('aria-label')));
-        console.log("Places found: " + placeNames.length);
+    for (let startPoint of startingPoints) {
+        for (let category of placeCategories) {
+            let siteUrl = 'https://www.google.com/maps/place/' + category + '/@' + startPoint.lat + "," + startPoint.long;
+            console.log('Scraping places in category "' + category + '" from the starting point of ' + startPoint.name + ". URL: " + siteUrl)
+            await page.goto(siteUrl);
+            await new Promise(resolve => setTimeout(resolve, 5000))
+            do {
+                console.log("Scraping page " + 0)
+                const placeNames = await page.$$eval('.section-result', divs => divs.map(div => div.getAttribute('aria-label')))
+                console.log("Places found: " + placeNames.length)
 
-        for( let i = 0; i < placeNames.length; i++ ) {
-            await page.click('.section-result[data-result-index="' + (i+1) + '"]')
-            await new Promise(resolve => setTimeout(resolve, 2000))
-            await page.waitForSelector('.section-back-to-list-button')
+                for (let i = 0; i < placeNames.length; i++) {
+                    await page.click('.section-result[data-result-index="' + (i+1) + '"]')
+                    await new Promise(resolve => setTimeout(resolve, 2000))
+                    await page.waitForSelector('.section-back-to-list-button')
 
-            if (await withinBounds(page)) {
-                const place = await scrapePlaceData(page)
-                console.log(place)
-            }
-            
-            await page.click('.section-back-to-list-button')
-            await new Promise(resolve => setTimeout(resolve, 1500))
-            await page.waitForSelector('.section-result')
-        };
+                    if (await withinBounds(page)) {
+                        const place = await scrapePlaceData(page)
+                        console.log(place)
+                        let result = await db.collection('places').find({ coordinates: { $all: place.coordinates }})
+                        console.log("Count: " + await result.count())
+                        if (!await result.count())
+                            db.collection('places').insert(place)
+                        else
+                            console.log("Place with coordinates " + place.coordinates + " already in the database")
+                    }
+                    await page.click('.section-back-to-list-button')
+                    await new Promise(resolve => setTimeout(resolve, 1500))
+                    await page.waitForSelector('.section-result')
+                };
 
-        await page.click('button[aria-label*="Next page"]')
-        await new Promise(resolve => setTimeout(resolve, 5000))
-        //page.waitForNavigation({ waitUntil: "networkidle0" }),
-    } while (await page.waitForSelector('button[aria-label*="Next page"]'));
+                await page.click('button[aria-label*="Next page"]')
+                await new Promise(resolve => setTimeout(resolve, 5000))
+                //page.waitForNavigation({ waitUntil: "networkidle0" }),
+            } while (await page.waitForSelector('button[aria-label*="Next page"]'));
+        }
+    }
 
     await browser.close();
-})();
+}
 
 const scrapePlaceData = async (page) => {
     let place = {}
