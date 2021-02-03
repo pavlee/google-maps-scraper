@@ -13,33 +13,50 @@ const sqrMNE = {
 (async () => {
     // Open the connection to the server
     MongoClient.connect('mongodb://admin:admin@localhost:27017/', (err, db) => {
-        // Get the first db and do an update document on it
         mainLoop(db.db("places"))
     })
 })();
 
 async function mainLoop(db) {
-    const placeCategories = ["Bars", "Restaurants", "Takeout", "Groceries", "Hotels", "Banks"]
     const browser = await puppeteer.launch();
     const page = await browser.newPage();
+    let siteUrl = 'https://www.google.com/maps/@42.4378146,19.2625154,15z';
+    await page.goto(siteUrl);
+    await new Promise(resolve => setTimeout(resolve, 2000))
 
     let rawData = fs.readFileSync('starting-points.json')
     let startingPoints = JSON.parse(rawData)
     let currentPage = 0;
 
     for (let startPoint of startingPoints) {
+        const searchInput = await page.$('.tactile-searchbox-input');
+        await searchInput.click({ clickCount: 3 })
+        await searchInput.type(startPoint.name);
+        
+        await page.keyboard.press(String.fromCharCode(13)) // press enter
+        await new Promise(resolve => setTimeout(resolve, 3000))
+
+        await page.click('button[data-value="Nearby"]')
+        await new Promise(resolve => setTimeout(resolve, 2000))
+
+        let placeCategories = await page.$$('.suggestions .sbsb_c')        
+
         for (let category of placeCategories) {
-            let siteUrl = 'https://www.google.com/maps/place/' + category + '/@' + startPoint.lat + "," + startPoint.long;
-            console.log('Scraping places in category "' + category + '" from the starting point of ' + startPoint.name + ". URL: " + siteUrl)
-            await page.goto(siteUrl);
+            await category.click()
             await new Promise(resolve => setTimeout(resolve, 5000))
+            let pageCounter = 1;
             do {
-                console.log("Scraping page " + 0)
+                console.log("Scraping page " + pageCounter)
                 const placeNames = await page.$$eval('.section-result', divs => divs.map(div => div.getAttribute('aria-label')))
                 console.log("Places found: " + placeNames.length)
 
                 for (let i = 0; i < placeNames.length; i++) {
-                    await page.click('.section-result[data-result-index="' + (i+1) + '"]')
+                    try {
+                        await page.click('.section-result[data-result-index="' + (i+1) + '"]')
+                    } catch (e) {
+                        console.log("error processing place " + (i+1))
+                        continue;
+                    }
                     await new Promise(resolve => setTimeout(resolve, 2000))
                     await page.waitForSelector('.section-back-to-list-button')
 
@@ -47,7 +64,7 @@ async function mainLoop(db) {
                         const place = await scrapePlaceData(page)
                         console.log(place)
                         let result = await db.collection('places').find({ coordinates: { $all: place.coordinates }})
-                        console.log("Count: " + await result.count())
+                        console.log("Exists in the database: " + await result.count()==1 ? 'Yes' : 'No')
                         if (!await result.count())
                             db.collection('places').insert(place)
                         else
@@ -58,6 +75,7 @@ async function mainLoop(db) {
                     await page.waitForSelector('.section-result')
                 };
 
+                pageCounter++
                 await page.click('button[aria-label*="Next page"]')
                 await new Promise(resolve => setTimeout(resolve, 5000))
                 //page.waitForNavigation({ waitUntil: "networkidle0" }),
@@ -93,9 +111,16 @@ const scrapePlaceData = async (page) => {
         let fullAddress = await page.evaluate(a => a.textContent, addressHandles[0])
         fullAddress = fullAddress.replace('Address: ', '').split(',').map(s => s.trim())
 
-        const address = fullAddress[0]
-        const city = fullAddress[1]
-        const country = fullAddress[2]
+        let di = 0;
+        let address, city, country = null
+
+        // location info specificity can vary
+        if (fullAddress.length == 3)
+            address = fullAddress[di++]
+        if (fullAddress.length >= 2)
+            city = fullAddress[di++]
+        if (fullAddress.length >= 1)
+            country = fullAddress[di++]
 
         place.address = address
         place.city = city
@@ -142,6 +167,14 @@ const scrapePlaceData = async (page) => {
     const url = page.url()
     place.coordinates = url.substr(url.lastIndexOf('!3d') + 3).split('!4d')
     return place;
+}
+
+const scrapeReviews = async (page) => {
+    await page.$('button[aria-label*="reviews"]').click()
+    await new Promise(resolve => setTimeout(resolve, 1000))
+
+    '.section-review-content' // selector to get the list of reviews at this point
+    // to be continued
 }
 
 const withinBounds = async (page) => {
