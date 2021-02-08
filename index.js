@@ -18,7 +18,7 @@ const sqrMNE = {
 })();
 
 async function mainLoop(db) {
-    const browser = await puppeteer.launch();
+    const browser = await puppeteer.launch({ headless: false });
     const page = await browser.newPage();
     let siteUrl = 'https://www.google.com/maps/@42.4378146,19.2625154,15z';
     await page.goto(siteUrl);
@@ -63,12 +63,7 @@ async function mainLoop(db) {
                     if (await withinBounds(page)) {
                         const place = await scrapePlaceData(page)
                         console.log(place)
-                        let result = await db.collection('places').find({ coordinates: { $all: place.coordinates }})
-                        console.log("Exists in the database: " + await result.count()==1 ? 'Yes' : 'No')
-                        if (!await result.count())
-                            db.collection('places').insert(place)
-                        else
-                            console.log("Place with coordinates " + place.coordinates + " already in the database")
+                        await savePlace(db, place)
                     }
                     await page.click('.section-back-to-list-button')
                     await new Promise(resolve => setTimeout(resolve, 1500))
@@ -84,6 +79,24 @@ async function mainLoop(db) {
     }
 
     await browser.close();
+}
+
+const savePlace = async (db, place) => {
+    let result = await db.collection('places').find({ coordinates: { $all: place.coordinates }})
+    console.log("Exists in the database: " + await result.count()==1 ? 'Yes' : 'No')
+    if (!await result.count()) {
+        let reviews = place.reviews
+        place.reviews = undefined
+        place = await db.collection('places').insertOne(place)
+        
+        for (let review of reviews) {
+            review.place_id = place.insertedId
+        }
+
+        db.collection('reviews').insert(reviews)
+    } else {
+        console.log("Place with coordinates " + place.coordinates + " already in the database")
+    }
 }
 
 const scrapePlaceData = async (page) => {
@@ -166,15 +179,80 @@ const scrapePlaceData = async (page) => {
 
     const url = page.url()
     place.coordinates = url.substr(url.lastIndexOf('!3d') + 3).split('!4d')
-    return place;
+    let reviews = await scrapeReviews(page)
+    place.reviews = reviews
+    return place
 }
 
 const scrapeReviews = async (page) => {
-    await page.$('button[aria-label*="reviews"]').click()
+    let reviews = []
+    const reviewsBtn = await page.$('button[aria-label*="reviews"]')
+    await reviewsBtn.click()
     await new Promise(resolve => setTimeout(resolve, 1000))
 
-    '.section-review-content' // selector to get the list of reviews at this point
-    // to be continued
+    await autoScroll(page)
+
+    let reviewHandles = await page.$$('.section-review-content') // selector to get the list of reviews at this point
+    if (reviewHandles) 
+    for (let reviewHandle of reviewHandles) {
+        let review = {}
+        const titleSelector = '.section-review-title span';
+        if (await reviewHandle.$(titleSelector)) {
+            const title = await reviewHandle.$eval(titleSelector, span => span.textContent);
+            review.title = title
+        }
+
+        const subtitle1Selector = '.section-review-subtitle span:nth-child(1)';
+        if (await reviewHandle.$(subtitle1Selector)) {
+            const subtitle1 = await reviewHandle.$eval(subtitle1Selector, span => span.textContent);
+            review.subtitle1 = subtitle1
+        }
+
+        const subtitle2Selector = '.section-review-subtitle span:nth-child(2)';
+        if (await reviewHandle.$(subtitle2Selector)) {
+            const subtitle2 = await reviewHandle.$eval(subtitle2Selector, span => span.textContent);
+            review.subtitle2 = subtitle2
+        }
+
+        const reviewTextSelector = '.section-review-text';
+        if (await reviewHandle.$(reviewTextSelector)) {
+            const reviewText = await reviewHandle.$eval(reviewTextSelector, span => span.textContent);
+            review.reviewText = reviewText
+        }
+
+        const starsSelector = '.section-review-stars .section-review-star-active'; 
+        const starsHandle = await reviewHandle.$$(starsSelector);
+        if (starsHandle) {
+            review.stars = starsHandle.length
+        }
+
+        reviews.push(review)
+        console.log(review)
+    }
+
+    const backBtn = await page.$('button.mdc-icon-button')
+    await backBtn.click()
+    await new Promise(resolve => setTimeout(resolve, 4000))
+
+    return reviews
+}
+
+async function autoScroll(page) {
+    await page.evaluate(async () => {
+        await new Promise((resolve, reject) => {
+            var lastTotalHeight = 0;
+            var timer = setInterval(() => {
+                let reviewScrollable = document.querySelector('.section-layout.section-scrollbox.scrollable-y.scrollable-show')
+                var scrollHeight = document.querySelector('.section-layout-root .section-layout').scrollHeight;
+                if (scrollHeight == lastTotalHeight) {
+                    clearInterval(timer);
+                    resolve();
+                }
+                lastTotalHeight = scrollHeight
+                reviewScrollable.scrollBy(0, 150000)
+            }, 2000);
+        });
+    });
 }
 
 const withinBounds = async (page) => {
